@@ -1,0 +1,442 @@
+import tkinter as tk
+from tkinter import scrolledtext, ttk, messagebox, filedialog
+from PIL import Image, ImageTk
+import threading
+import time
+from llama_cpp import Llama
+import base64
+import os
+import sys
+from llama_cpp import Llama
+
+# 获取打包后的临时目录路径
+if getattr(sys, 'frozen', False):
+    base_path = sys._MEIPASS
+
+    # 根据不同操作系统设置不同的库文件名
+    if sys.platform.startswith('win'):
+        # Windows 系统
+        llama_lib_name = 'llama.dll'
+    elif sys.platform.startswith('linux'):
+        # Linux 系统
+        llama_lib_name = 'libllama.so'
+    elif sys.platform.startswith('darwin'):
+        # macOS 系统
+        llama_lib_name = 'libllama.dylib'
+    else:
+        raise RuntimeError("不支持的操作系统")
+
+    # 设置 llama_cpp 库的路径
+    llama_lib_path = os.path.join(base_path, llama_lib_name)
+    os.environ['LLAMA_CPP_LIB'] = llama_lib_path
+
+
+# 其余代码保持不变...
+
+class LocalDeepSeekGUI:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("陈冁昊的本地DeepSeek 14B veary big！")
+        self.root.geometry("900x700")
+        self.root.minsize(700, 600)
+
+        # 设置字体确保中文显示正常
+        self.font_family = ("SimHei", "WenQuanYi Micro Hei", "Heiti TC", "Arial")
+
+        # 模型配置 - 初始不固定路径
+        self.model_path = ""
+        self.n_ctx = 2048  # 上下文窗口大小
+        self.n_gpu_layers = -1  # GPU层数量，-1表示使用所有可用层
+        self.n_threads = 4  # 推理线程数
+
+        # 模型实例
+        self.llm = None
+
+        # 模型加载状态标志
+        self.model_loaded = False
+
+        # 创建UI组件
+        self._create_widgets()
+
+        # 历史对话
+        self.conversation_history = []
+
+        # 初始不加载模型，等待用户设置路径
+        self.status_var.set("请在设置中选择模型路径")
+
+        # 智能体设置
+        self.agents = {}
+        self.selected_agent = None
+
+    def _create_widgets(self):
+        # 创建主框架
+        main_frame = ttk.Frame(self.root, padding="10")
+        main_frame.pack(fill=tk.BOTH, expand=True)
+
+        # 顶部信息栏
+        info_frame = ttk.Frame(main_frame)
+        info_frame.pack(fill=tk.X, pady=(0, 10))
+
+        ttk.Label(info_frame, text="模型状态:", font=(self.font_family[0], 10)).pack(side=tk.LEFT, padx=(0, 5))
+        self.status_var = tk.StringVar(value="请在设置中选择模型路径")
+        ttk.Label(info_frame, textvariable=self.status_var, font=(self.font_family[0], 10, "bold")).pack(side=tk.LEFT)
+
+        # 设置按钮
+        self.settings_button = ttk.Button(info_frame, text="设置", command=self._open_settings_window)
+        self.settings_button.pack(side=tk.RIGHT, padx=(5, 0))
+
+        # 智能体设置按钮
+        self.agent_button = ttk.Button(info_frame, text="智能体设置", command=self._open_agent_settings_window)
+        self.agent_button.pack(side=tk.RIGHT, padx=(5, 0))
+
+        # 对话历史显示区域
+        history_frame = ttk.LabelFrame(main_frame, text="对话历史", padding="5")
+        history_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
+
+        self.history_text = scrolledtext.ScrolledText(history_frame, wrap=tk.WORD, font=(self.font_family[0], 11))
+        self.history_text.pack(fill=tk.BOTH, expand=True)
+        self.history_text.config(state=tk.DISABLED)
+
+        # 用户输入区域
+        input_frame = ttk.LabelFrame(main_frame, text="输入", padding="5")
+        input_frame.pack(fill=tk.BOTH, expand=True)
+
+        self.input_text = scrolledtext.ScrolledText(input_frame, wrap=tk.WORD, height=4, font=(self.font_family[0], 11))
+        self.input_text.pack(fill=tk.BOTH, expand=True, pady=(0, 5))
+        self.input_text.focus_set()
+
+        # 按钮区域
+        button_frame = ttk.Frame(main_frame)
+        button_frame.pack(fill=tk.X, pady=(10, 0))
+
+        self.send_button = ttk.Button(button_frame, text="发送", command=self._send_message, width=15, state=tk.DISABLED)
+        self.send_button.pack(side=tk.RIGHT, padx=(5, 0))
+
+        self.clear_button = ttk.Button(button_frame, text="清空对话", command=self._clear_conversation, width=15)
+        self.clear_button.pack(side=tk.RIGHT)
+
+        self.select_image_button = ttk.Button(button_frame, text="选择图片", command=self._select_image, width=15)
+        self.select_image_button.pack(side=tk.LEFT)
+
+        # 图片显示区域
+        self.image_frame = ttk.LabelFrame(main_frame, text="图片", padding="5")
+        self.image_frame.pack(fill=tk.BOTH, expand=True, pady=(10, 0))
+        self.image_label = ttk.Label(self.image_frame)
+        self.image_label.pack()
+
+        # 绑定Enter键发送消息
+        self.input_text.bind("<Return>", lambda event: self._send_message() or "break")
+
+    def _open_settings_window(self):
+        settings_window = tk.Toplevel(self.root)
+        settings_window.title("设置")
+        settings_window.geometry("400x450")
+
+        # 模型路径
+        ttk.Label(settings_window, text="模型路径:", font=(self.font_family[0], 10)).pack(pady=(10, 0))
+        model_path_frame = ttk.Frame(settings_window)
+        model_path_frame.pack(pady=(5, 0))
+
+        model_path_entry = ttk.Entry(model_path_frame, width=35)
+        model_path_entry.insert(0, self.model_path)
+        model_path_entry.pack(side=tk.LEFT)
+
+        def select_model_path():
+            path = filedialog.askopenfilename(filetypes=[("模型文件", "*.*")])
+            if path:
+                model_path_entry.delete(0, tk.END)
+                model_path_entry.insert(0, path)
+
+        select_path_button = ttk.Button(model_path_frame, text="选择路径", command=select_model_path)
+        select_path_button.pack(side=tk.LEFT, padx=(5, 0))
+
+        # 上下文窗口大小
+        ttk.Label(settings_window, text="上下文窗口大小:", font=(self.font_family[0], 10)).pack(pady=(10, 0))
+        n_ctx_entry = ttk.Entry(settings_window, width=10)
+        n_ctx_entry.insert(0, str(self.n_ctx))
+        n_ctx_entry.pack(pady=(5, 0))
+
+        # GPU层数量
+        ttk.Label(settings_window, text="GPU层数量:", font=(self.font_family[0], 10)).pack(pady=(10, 0))
+        n_gpu_layers_entry = ttk.Entry(settings_window, width=10)
+        n_gpu_layers_entry.insert(0, str(self.n_gpu_layers))
+        n_gpu_layers_entry.pack(pady=(5, 0))
+
+        # 推理线程数
+        ttk.Label(settings_window, text="推理线程数:", font=(self.font_family[0], 10)).pack(pady=(10, 0))
+        n_threads_entry = ttk.Entry(settings_window, width=10)
+        n_threads_entry.insert(0, str(self.n_threads))
+        n_threads_entry.pack(pady=(5, 0))
+
+        # 保存设置按钮
+        def save_settings():
+            try:
+                self.model_path = model_path_entry.get()
+                self.n_ctx = int(n_ctx_entry.get())
+                self.n_gpu_layers = int(n_gpu_layers_entry.get())
+                self.n_threads = int(n_threads_entry.get())
+
+                if self.model_loaded:
+                    self.llm = None
+                    self.model_loaded = False
+
+                threading.Thread(target=self._load_model, daemon=True).start()
+                settings_window.destroy()
+            except ValueError:
+                messagebox.showerror("错误", "请输入有效的整数。")
+
+        save_button = ttk.Button(settings_window, text="保存设置", command=save_settings)
+        save_button.pack(pady=(20, 0))
+
+    def _open_agent_settings_window(self):
+        agent_window = tk.Toplevel(self.root)
+        agent_window.title("智能体设置")
+        agent_window.geometry("400x300")
+
+        # 已定义的智能体列表
+        agent_listbox = tk.Listbox(agent_window)
+        for agent_name in self.agents.keys():
+            agent_listbox.insert(tk.END, agent_name)
+        agent_listbox.pack(fill=tk.BOTH, expand=True)
+
+        def select_agent():
+            selected_index = agent_listbox.curselection()
+            if selected_index:
+                agent_name = agent_listbox.get(selected_index)
+                self.selected_agent = self.agents[agent_name]
+                agent_window.destroy()
+
+        select_button = ttk.Button(agent_window, text="选择智能体", command=select_agent)
+        select_button.pack(pady=(10, 0))
+
+        def add_agent():
+            add_window = tk.Toplevel(agent_window)
+            add_window.title("添加智能体")
+            add_window.geometry("300x200")
+
+            ttk.Label(add_window, text="智能体名称:", font=(self.font_family[0], 10)).pack(pady=(10, 0))
+            name_entry = ttk.Entry(add_window, width=20)
+            name_entry.pack(pady=(5, 0))
+
+            ttk.Label(add_window, text="智能体描述:", font=(self.font_family[0], 10)).pack(pady=(10, 0))
+            desc_entry = ttk.Entry(add_window, width=20)
+            desc_entry.pack(pady=(5, 0))
+
+            def save_agent():
+                agent_name = name_entry.get()
+                agent_desc = desc_entry.get()
+                if agent_name and agent_desc:
+                    self.agents[agent_name] = agent_desc
+                    agent_listbox.insert(tk.END, agent_name)
+                    add_window.destroy()
+
+            save_button = ttk.Button(add_window, text="保存智能体", command=save_agent)
+            save_button.pack(pady=(20, 0))
+
+        add_button = ttk.Button(agent_window, text="添加智能体", command=add_agent)
+        add_button.pack(pady=(10, 0))
+
+    def _load_model(self):
+        if not self.model_path:
+            error_msg = "请先选择有效的模型路径。"
+            self.status_var.set(error_msg)
+            self._update_history(error_msg + "\n\n", "error")
+            messagebox.showerror("错误", error_msg)
+            return
+
+        try:
+            self.status_var.set(f"加载模型: {self.model_path}")
+            start_time = time.time()
+
+            # 加载模型
+            self.llm = Llama(
+                model_path=self.model_path,
+                n_ctx=self.n_ctx,
+                n_gpu_layers=self.n_gpu_layers,
+                n_threads=self.n_threads,
+                verbose=False
+            )
+
+            elapsed_time = time.time() - start_time
+            self.status_var.set(f"模型加载完成 (耗时: {elapsed_time:.2f}秒)")
+            self.send_button.config(state=tk.NORMAL)
+
+            # 设置模型加载状态标志
+            self.model_loaded = True
+
+            # 显示加载完成消息
+            self._update_history(f"模型加载完成，可以开始对话。\n\n", "system")
+
+        except Exception as e:
+            error_msg = f"模型加载失败: {str(e)}"
+            self.status_var.set(error_msg)
+            self._update_history(error_msg + "\n\n", "error")
+            messagebox.showerror("错误", error_msg)
+
+    def _check_model_loaded(self):
+        """检查模型是否已加载，如果未加载则显示错误消息"""
+        if not self.model_loaded or self.llm is None:
+            error_msg = "模型还未加载完成，请稍候再试。"
+            self._update_history(error_msg + "\n\n", "error")
+            messagebox.showerror("错误", error_msg)
+            return False
+        return True
+
+    def _send_message(self):
+        user_message = self.input_text.get("1.0", tk.END).strip()
+        if not user_message:
+            return
+
+        # 检查模型是否已加载
+        if not self._check_model_loaded():
+            return
+
+        # 清空输入框
+        self.input_text.delete("1.0", tk.END)
+
+        # 更新对话历史
+        self._update_history(f"你: {user_message}\n\n", "user")
+
+        # 更新状态
+        self.status_var.set("思考中...")
+        self.send_button.config(state=tk.DISABLED)
+
+        # 在新线程中获取AI响应
+        threading.Thread(target=self._get_ai_response, args=(user_message,), daemon=True).start()
+
+    def _get_ai_response(self, user_message):
+        # 再次检查模型是否已加载
+        if not self.model_loaded or self.llm is None:
+            error_msg = "模型还未加载完成，无法进行推理。"
+            self.root.after(0, self._update_history, error_msg + "\n\n", "error")
+            self.root.after(0, messagebox.showerror, "错误", error_msg)
+            return
+
+        try:
+            # 添加到对话历史
+            self.conversation_history.append({"role": "user", "content": user_message})
+
+            # 构建提示词
+            prompt = self._build_prompt()
+
+            # 如果有选择的智能体，添加到提示词中
+            if self.selected_agent:
+                prompt = f"{self.selected_agent}\n{prompt}"
+
+            # 生成回复
+            self.root.after(0, self._update_history, "DeepSeek 14B: ", "ai")
+
+            response = self.llm.create_chat_completion(
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=1024,
+                temperature=0.7,
+                top_p=0.9,
+                stream=True
+            )
+
+            ai_response = ""
+            for chunk in response:
+                if 'choices' in chunk and len(chunk['choices']) > 0:
+                    if 'delta' in chunk['choices'][0] and 'content' in chunk['choices'][0]['delta']:
+                        content = chunk['choices'][0]['delta']['content']
+                        if content:
+                            ai_response += content
+                            self.root.after(0, self._update_history, content, "append")
+
+            # 添加到对话历史
+            self.conversation_history.append({"role": "assistant", "content": ai_response})
+
+            # 添加空行
+            self.root.after(0, self._update_history, "\n\n", "append")
+
+        except Exception as e:
+            error_msg = f"发生错误: {str(e)}"
+            self.root.after(0, self._update_history, error_msg + "\n\n", "error")
+            self.root.after(0, messagebox.showerror, "错误", error_msg)
+        finally:
+            # 更新状态
+            self.root.after(0, self.status_var.set, "就绪")
+            self.root.after(0, self.send_button.config, {"state": tk.NORMAL})
+
+    def _build_prompt(self):
+        # 构建对话提示词
+        prompt = ""
+        for msg in self.conversation_history:
+            if msg["role"] == "user":
+                prompt += f"用户: {msg['content']}\n"
+            elif msg["role"] == "assistant":
+                prompt += f"助手: {msg['content']}\n"
+        prompt += "助手: "
+        return prompt
+
+    def _update_history(self, text, mode):
+        self.history_text.config(state=tk.NORMAL)
+
+        if mode == "user":
+            self.history_text.insert(tk.END, text, "user")
+        elif mode == "ai":
+            self.history_text.insert(tk.END, text, "ai")
+        elif mode == "system":
+            self.history_text.insert(tk.END, text, "system")
+        elif mode == "error":
+            self.history_text.insert(tk.END, text, "error")
+        else:  # append
+            self.history_text.insert(tk.END, text)
+
+        # 设置标签样式
+        self.history_text.tag_config("user", foreground="#0066cc", font=(self.font_family[0], 11, "bold"))
+        self.history_text.tag_config("ai", foreground="#cc6600", font=(self.font_family[0], 11, "bold"))
+        self.history_text.tag_config("system", foreground="#008000", font=(self.font_family[0], 11, "italic"))
+        self.history_text.tag_config("error", foreground="#ff0000", font=(self.font_family[0], 11, "bold"))
+
+        # 滚动到底部
+        self.history_text.see(tk.END)
+        self.history_text.config(state=tk.DISABLED)
+
+    def _clear_conversation(self):
+        self.history_text.config(state=tk.NORMAL)
+        self.history_text.delete("1.0", tk.END)
+        self.history_text.config(state=tk.DISABLED)
+        self.conversation_history = []
+        self.status_var.set("对话已清空")
+
+    def _select_image(self):
+        file_path = filedialog.askopenfilename(filetypes=[("图片文件", "*.png;*.jpg;*.jpeg")])
+        if file_path:
+            try:
+                # 打开图片
+                image = Image.open(file_path)
+                # 调整图片大小以适应显示区域
+                image.thumbnail((300, 300))
+                photo = ImageTk.PhotoImage(image)
+
+                # 更新图片显示
+                self.image_label.config(image=photo)
+                self.image_label.image = photo
+
+                # 将图片转换为Base64编码
+                with open(file_path, "rb") as image_file:
+                    encoded_string = base64.b64encode(image_file.read()).decode('utf-8')
+
+                # 将图片信息添加到对话历史
+                image_info = f"你选择了图片: <base64>{encoded_string}</base64>"
+                self._update_history(f"你: {image_info}\n\n", "user")
+                self.conversation_history.append({"role": "user", "content": image_info})
+
+                # 检查模型是否已加载
+                if not self._check_model_loaded():
+                    return
+
+                # 在新线程中发送图片信息给模型获取响应
+                threading.Thread(target=self._get_ai_response, args=(image_info,), daemon=True).start()
+ 
+            except Exception as e:
+                error_msg = f"图片加载失败: {str(e)}"
+                self._update_history(error_msg + "\n\n", "error")
+                messagebox.showerror("错误", error_msg)
+
+
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = LocalDeepSeekGUI(root)
+    root.mainloop()
